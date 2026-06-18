@@ -9,6 +9,26 @@ export interface ParsedPsd {
   layerCount: number;
   /** True if any layer carries real vector shape data. */
   hasVectorLayers: boolean;
+  /** Visible raster leaf layers that can be exported on their own. */
+  layers: LayerInfo[];
+}
+
+/** A single exportable layer: its own trimmed raster canvas plus display data. */
+export interface LayerInfo {
+  /** Stable running index — used for React keys and busy keys. */
+  id: string;
+  /** Display name including the group path, e.g. "Group 1 / Shadow". */
+  name: string;
+  /** The layer's own raster canvas, cropped to its content bounds. */
+  canvas: HTMLCanvasElement;
+  /** canvas.width — the layer's bounds, NOT the document size. */
+  width: number;
+  /** canvas.height — the layer's bounds, NOT the document size. */
+  height: number;
+  /** Small dataURL preview for the layer list. */
+  thumbnailUrl: string;
+  /** Sanitized, deduped name used to build the download filename. */
+  fileSafeName: string;
 }
 
 /** Recursively walk the layer tree, counting layers and detecting vector shapes. */
@@ -29,6 +49,78 @@ function inspectLayers(layers: Layer[] | undefined): {
     hasVector = hasVector || child.hasVector;
   }
   return { count, hasVector };
+}
+
+/** Make a string safe to use as a filename: strip invalid chars, collapse whitespace. */
+function sanitizeName(name: string): string {
+  const cleaned = name
+    .replace(/[<>:"/\\|?*-]/g, '_')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return cleaned || 'layer';
+}
+
+/** Downscale a layer canvas to a small dataURL thumbnail (longest side <= max). */
+function makeThumbnail(source: HTMLCanvasElement, max = 64): string {
+  const longest = Math.max(source.width, source.height);
+  const scale = longest > max ? max / longest : 1;
+  const w = Math.max(1, Math.round(source.width * scale));
+  const h = Math.max(1, Math.round(source.height * scale));
+  const thumb = document.createElement('canvas');
+  thumb.width = w;
+  thumb.height = h;
+  const ctx = thumb.getContext('2d');
+  if (ctx) ctx.drawImage(source, 0, 0, w, h);
+  return thumb.toDataURL('image/png');
+}
+
+/**
+ * Walk the layer tree and collect visible raster leaf layers as exportable
+ * entries. Group folders and layers without a canvas (adjustment/empty) are
+ * skipped; hidden layers (and hidden groups) are excluded entirely. dataURL
+ * thumbnails are generated once here. Filenames are sanitized and deduped.
+ */
+function collectLayers(layers: Layer[] | undefined): LayerInfo[] {
+  const out: LayerInfo[] = [];
+
+  const walk = (items: Layer[] | undefined, parentPath: string[]) => {
+    for (const layer of items ?? []) {
+      if (layer.hidden) continue;
+      const rawName = layer.name?.trim() || 'Layer';
+
+      if (layer.children) {
+        walk(layer.children, [...parentPath, rawName]);
+        continue;
+      }
+
+      const canvas = layer.canvas;
+      if (!canvas || !canvas.width || !canvas.height) continue;
+
+      const name = [...parentPath, rawName].join(' / ');
+      out.push({
+        id: String(out.length),
+        name,
+        canvas,
+        width: canvas.width,
+        height: canvas.height,
+        thumbnailUrl: makeThumbnail(canvas),
+        fileSafeName: sanitizeName([...parentPath, rawName].join('_')),
+      });
+    }
+  };
+
+  walk(layers, []);
+
+  // Dedupe filenames so two layers with the same name don't collide on download.
+  const seen = new Map<string, number>();
+  for (const info of out) {
+    const count = seen.get(info.fileSafeName) ?? 0;
+    seen.set(info.fileSafeName, count + 1);
+    if (count > 0) info.fileSafeName = `${info.fileSafeName}-${count + 1}`;
+  }
+
+  return out;
 }
 
 /** Parse a PSD File into a flattened canvas plus metadata. Throws on malformed input. */
@@ -63,6 +155,7 @@ export async function parsePsd(file: File): Promise<ParsedPsd> {
   }
 
   const { count, hasVector } = inspectLayers(psd.children);
+  const layers = collectLayers(psd.children);
 
   return {
     canvas,
@@ -70,6 +163,7 @@ export async function parsePsd(file: File): Promise<ParsedPsd> {
     height: psd.height,
     layerCount: count,
     hasVectorLayers: hasVector,
+    layers,
   };
 }
 

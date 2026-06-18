@@ -6,8 +6,11 @@ import {
   exportPng,
   exportSvg,
   parsePsd,
+  type LayerInfo,
   type ParsedPsd,
 } from './lib/psd';
+
+type ExportFormat = 'png' | 'jpg' | 'svg';
 
 type Status = 'idle' | 'parsing' | 'ready' | 'error';
 
@@ -22,7 +25,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [file, setFile] = useState<LoadedFile | null>(null);
   const [dragging, setDragging] = useState(false);
-  const [busyFormat, setBusyFormat] = useState<string | null>(null);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
   const [jpgQuality, setJpgQuality] = useState(0.92);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -80,13 +83,10 @@ export default function App() {
     [handleFile],
   );
 
-  const doExport = useCallback(
-    async (format: 'png' | 'jpg' | 'svg') => {
-      if (!file) return;
-      setBusyFormat(format);
+  const exportCanvas = useCallback(
+    async (canvas: HTMLCanvasElement, stem: string, format: ExportFormat, key: string) => {
+      setBusyKey(key);
       try {
-        const { canvas } = file.parsed;
-        const stem = baseName(file.name);
         if (format === 'png') {
           downloadBlob(await exportPng(canvas), `${stem}.png`);
         } else if (format === 'jpg') {
@@ -98,10 +98,27 @@ export default function App() {
         setStatus('error');
         setError(err instanceof Error ? err.message : 'Export failed.');
       } finally {
-        setBusyFormat(null);
+        setBusyKey(null);
       }
     },
-    [file, jpgQuality],
+    [jpgQuality],
+  );
+
+  const doExport = useCallback(
+    (format: ExportFormat) => {
+      if (!file) return;
+      void exportCanvas(file.parsed.canvas, baseName(file.name), format, format);
+    },
+    [file, exportCanvas],
+  );
+
+  const doExportLayer = useCallback(
+    (layer: LayerInfo, format: ExportFormat) => {
+      if (!file) return;
+      const stem = `${baseName(file.name)}_${layer.fileSafeName}`;
+      void exportCanvas(layer.canvas, stem, format, `layer:${layer.id}:${format}`);
+    },
+    [file, exportCanvas],
   );
 
   const reset = useCallback(() => {
@@ -213,20 +230,20 @@ export default function App() {
                   label="Download PNG"
                   hint="Lossless, keeps transparency"
                   onClick={() => doExport('png')}
-                  busy={busyFormat === 'png'}
+                  busy={busyKey === 'png'}
                   primary
                 />
                 <ExportButton
                   label="Download JPG"
                   hint="Smaller, white background"
                   onClick={() => doExport('jpg')}
-                  busy={busyFormat === 'jpg'}
+                  busy={busyKey === 'jpg'}
                 />
                 <ExportButton
                   label="Download SVG"
                   hint="Raster wrapped in SVG"
                   onClick={() => doExport('svg')}
-                  busy={busyFormat === 'svg'}
+                  busy={busyKey === 'svg'}
                 />
               </div>
 
@@ -255,6 +272,65 @@ export default function App() {
                   ? ' This file does contain vector shape layers, but export still uses the flattened raster composite.'
                   : ' This file has no vector shape layers, so the SVG is purely a raster image.'}
               </p>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900">Export individual layers</h2>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Download a single layer at its own size. JPG uses the quality slider above.
+                </p>
+              </div>
+
+              {file.parsed.layers.length === 0 ? (
+                <p className="rounded-lg border border-slate-200 bg-white px-3 py-3 text-xs text-slate-500">
+                  No separate layers to export — this PSD is flattened into a single image.
+                </p>
+              ) : (
+                <ul className="space-y-2">
+                  {file.parsed.layers.map((layer) => (
+                    <li
+                      key={layer.id}
+                      className="flex items-center gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2"
+                    >
+                      <div
+                        className="flex h-12 w-12 flex-none items-center justify-center overflow-hidden rounded border border-slate-200"
+                        style={{
+                          backgroundImage:
+                            'linear-gradient(45deg, #f1f5f9 25%, transparent 25%), linear-gradient(-45deg, #f1f5f9 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #f1f5f9 75%), linear-gradient(-45deg, transparent 75%, #f1f5f9 75%)',
+                          backgroundSize: '10px 10px',
+                          backgroundPosition: '0 0, 0 5px, 5px -5px, -5px 0',
+                        }}
+                      >
+                        <img
+                          src={layer.thumbnailUrl}
+                          alt={`Preview of ${layer.name}`}
+                          className="max-h-full max-w-full object-contain"
+                        />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium text-slate-800" title={layer.name}>
+                          {layer.name}
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          {layer.width} × {layer.height} px
+                        </p>
+                      </div>
+                      <div className="flex flex-none gap-1.5">
+                        {(['png', 'jpg', 'svg'] as ExportFormat[]).map((format) => (
+                          <LayerExportButton
+                            key={format}
+                            label={format.toUpperCase()}
+                            onClick={() => doExportLayer(layer, format)}
+                            busy={busyKey === `layer:${layer.id}:${format}`}
+                            disabled={busyKey !== null}
+                          />
+                        ))}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
 
             <div className="flex justify-center pt-2">
@@ -306,6 +382,28 @@ function ExportButton({
       <span className={`mt-0.5 text-xs ${primary ? 'text-sky-100' : 'text-slate-500'}`}>
         {hint}
       </span>
+    </button>
+  );
+}
+
+function LayerExportButton({
+  label,
+  onClick,
+  busy,
+  disabled,
+}: {
+  label: string;
+  onClick: () => void;
+  busy: boolean;
+  disabled: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className="rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 transition-colors hover:border-slate-400 hover:bg-slate-50 disabled:opacity-50"
+    >
+      {busy ? '…' : label}
     </button>
   );
 }
